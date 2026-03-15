@@ -1,4 +1,4 @@
-//Bibliothèques 
+//Bibliothèques
 #include <EEPROM.h>         // Permet de sauvegarder des paramètres dans la mémoire non volatile
 #include <ChainableLED.h>   //pour la LED RGB Grove
 #include <Wire.h>           //pour la communication I2C (RTC et LCD)
