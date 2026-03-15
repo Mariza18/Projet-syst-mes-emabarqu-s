@@ -12,17 +12,12 @@
 - Matériel utilisé
 
 ### I- Architecture du système
-- Architecture logicielle
-- Organisation du code
 
 ### II- Fonctionnement du logiciel
-- Fonctions principales
-- Cycle de fonctionnement
-- Machine à états
 
-### III- Complilation
+### III- Complilation et Téléversement
 
-- Évolutions futures
+### IV- Évolutions futures
 
 ### Conclusion
 
@@ -62,7 +57,6 @@ Présenter l’architecture du programme, expliquer :
 - la machine à états
 - l’organisation générale du code
 
-> Ce livrable ne contient pas de code finalisé, seulement la structure et le fonctionnement.
 
 <br>
 
@@ -76,16 +70,14 @@ Présenter l’architecture du programme, expliquer :
 
 - Lecteur carte SD (SPI)
 - Horloge RTC (I2C)
-- LED RGB (2 fils)
-- 2 boutons poussoirs
+- LED RGB (Grove)
+- 2 boutons poussoirs(D2 & D3)
 
 ### Capteurs principaux
 
-- Pression atmosphérique (I2C/SPI)
-- Température de l’air (I2C/SPI)
-- Hygrométrie (I2C/SPI)
+- Température et Hygrométrie (DHT11)
 - GPS (UART)
-- Luminosité (analogique)
+- Luminosité (Analogique)
 
 ### Modules complémentaires prévus
 
@@ -121,6 +113,7 @@ flowchart TD
     C --> I[Boutons]
 
 ```
+L'implémentation réelle repose sur des interruptions matérielles sur les entrées D2 et D3 pour garantir une réactivité immédiate de la machine à états.
 
 ## II- Fonctionnement du logiciel
 <br>
@@ -305,23 +298,11 @@ flowchart TD
 
 
 ### Mode Standard
-
 Acquisition normale + sauvegarde SD
-
- 
-
 ### Mode Économique
-
 Réduction fréquence + désactivation capteurs secondaires
-
- 
-
 ### Mode Maintenance
-
 Consultation en direct + retrait sécurisé SD
-
- 
-
 ### Mode Configuration
 
 Modification paramètres (acquisition désactivée)
@@ -342,8 +323,60 @@ Modification paramètres (acquisition désactivée)
 
 
 ---
+### III- Complilation et Téléversement
+Le programme est écrit en Arduino (C/C++) et peut être compilé et téléversé sur une Arduino Uno via l’IDE Arduino.
+Étapes:
 
-## Évolutions futures
+1.Cloner le dépôt GitHub :
+git clone https://github.com/<nom-du-repo>.git
+cd station-meteo
+
+2.Installer les bibliothèques Arduino nécessaires :
+
+- EEPROM
+
+- ChainableLED
+
+- Wire
+
+- SoftwareSerial
+
+- RTClib
+
+- SdFat
+
+- DHT
+
+- rgb_lcd
+Installation via : Outils → Gérer les bibliothèques dans l’IDE Arduino.
+3.Ouvrir main.ino dans l’IDE Arduino.
+4.Sélectionner la carte et le port :
+Outils → Type de carte → Arduino Uno
+Outils → Port → COMx / ttyUSBx
+5. Cliquer sur Téléverser pour compiler et envoyer le programme.
+
+### Structure du projet
+```
+station-meteo/
+│
+├─ README.md
+├─ main.ino
+├─ config.h
+├─ drivers/
+│   ├─ sensors_driver
+│   ├─ gps_driver
+│   ├─ rtc_driver
+│   ├─ sd_driver
+│   ├─ led_driver
+│   └─ buttons_driver
+└─ services/
+    ├─ acquisition_service
+    ├─ storage_service
+    └─ system_state
+```
+---
+### IV- Évolutions futures
+
 
 - Ajout capteurs marins  
 - Communication inter-navires  
