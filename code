@@ -1,0 +1,487 @@
+//Bibliothèques 
+#include <EEPROM.h>         // Permet de sauvegarder des paramètres dans la mémoire non volatile
+#include <ChainableLED.h>   //pour la LED RGB Grove
+#include <Wire.h>           //pour la communication I2C (RTC et LCD)
+#include <SoftwareSerial.h> //pour créer un port série virtuel (GPS)
+#include "RTClib.h"         //pour le module d'horloge temps réel
+#include <SdFat.h>          //pour la gestion de la carte SD
+#include "DHT.h"            //pour le capteur d'humidité et température
+#include <rgb_lcd.h>        //pour l'écran LCD 
+
+//Configuration des PINS
+#define DHTPIN 7             // Le capteur DHT11 est branché sur le pin D7
+#define DHTTYPE DHT11        // On définit le type de capteur (DHT11)
+#define BTN_ROUGE 3          // Bouton rouge sur D3
+#define BTN_VERT 2           // Bouton vert sur D2
+#define LED_DIN 5            // Pin de données pour la LED RGB
+#define LED_CIN 6            // Pin d'horloge pour la LED RGB
+#define SD_CS 10             // Pin de sélection (Chip Select) pour le module SD
+#define CAP_LUM A2           // Capteur de luminosité sur l'entrée analogique A2
+
+// Etats du système (Machine à états)
+enum Mode { MODE_STANDARD, MODE_ECO, MODE_MAINTENANCE, MODE_CONFIG };// Liste des modes possibles
+Mode modeActuel = MODE_STANDARD;// Stocke le mode en cours (Standard au démarrage)
+Mode modePrecedent = MODE_STANDARD;// Sert à mémoriser l'ancien mode lors d'une maintenance
+
+//Variables de gestion du temps et des boutons
+unsigned long t_btn_rouge = 0; // Chronomètre pour l'appui long sur bouton rouge
+unsigned long t_btn_vert = 0;  
+bool btn_rouge_presse = false; // État de l'appui (en cours ou non)
+bool btn_vert_presse = false;
+unsigned long lastMeasure = 0; // Stocke le temps de la dernière mesure effectuée
+
+//Paramètre de LOG
+unsigned long LOG_INTERVAL = 600000;// Intervalle de mesure par défaut (10min)
+unsigned long configStartTime = 0;  // Heure de début du mode configuration
+
+//Objets
+DHT dht(DHTPIN, DHTTYPE);
+rgb_lcd lcd;
+RTC_DS1307 rtc;
+ChainableLED leds(LED_DIN, LED_CIN, 1);// Création de l'objet LED (1 seule LED chaînée)
+SdFat SD;
+SoftwareSerial gpsSerial(4, 5); // Port série pour le GPS (RX sur D4, TX sur D5)
+String latitude = "NA";                   // Variable pour stocker la latitude
+String longitude = "NA";
+
+//Variable pour la LED et les erreurs
+unsigned long lastLed = 0;// Temps du dernier changement d'état de la LED (clignotement)
+bool ledState = false; // État actuel de la LED (allumée/éteinte)
+
+bool rtcErr = false;
+bool gpsErr = false;
+int sensErr = 0;     // 0: OK, 1: Erreur capteur, 2: Donnée incohérente
+int sdErr = 0;       // 0: OK, 1: Pleine, 3: Erreur écriture/accès
+
+//Fonction: Afficher l'heure
+void afficherHeure(Print &out, DateTime t) { // Ajoute un '0' devant si le chiffre est inférieur à 10 pour garder le format HH:MM:SS
+  if (t.hour() < 10) out.print('0'); out.print(t.hour()); out.print(':');
+  if (t.minute() < 10) out.print('0'); out.print(t.minute()); out.print(':');
+  if (t.second() < 10) out.print('0'); out.print(t.second());
+}
+
+//Fonction: Gestion des couleurs et clignotements de la LED
+void updLED() {
+
+  unsigned long interval = 500;// Intervalle de clignotement par défaut (500ms)
+ // Ajustement de l'intervalle si erreur critique (ratio 1/3 - 2/3)
+  if (sensErr == 2) interval = ledState ? 333 : 666;
+  if (sdErr == 3) interval = ledState ? 333 : 666;
+
+  if (millis() - lastLed < interval) return;// Si le temps écoulé est inférieur à l'intervalle, on ne fait rien
+
+  lastLed = millis();// Met à jour le temps
+  ledState = !ledState;// Alterne l'état (vrai/faux)
+
+  // Erreur RTC
+  if (rtcErr) {
+    if (ledState)
+      leds.setColorRGB(0,255,0,0);
+    else
+      leds.setColorRGB(0,0,0,255);
+    return;
+  }
+
+  // Erreur GPS
+  if (gpsErr) {
+    if (ledState)
+      leds.setColorRGB(0,255,0,0);
+    else
+      leds.setColorRGB(0,255,255,0);
+    return;
+  }
+
+  // Erreur CAPTEUR
+  if (sensErr == 1) {
+    if (ledState)
+      leds.setColorRGB(0,255,0,0);
+    else
+      leds.setColorRGB(0,0,255,0);
+    return;
+  }
+
+  // CAPTEUR INCOHÉRENT
+  if (sensErr == 2) {
+    if (ledState)
+      leds.setColorRGB(0,255,0,0);
+    else
+      leds.setColorRGB(0,0,255,0);
+    return;
+  }
+
+  // SD PLEINE
+  if (sdErr == 1) {
+    if (ledState)
+      leds.setColorRGB(0,255,0,0);
+    else
+      leds.setColorRGB(0,255,255,255);
+    return;
+  }
+
+  // Erreur ÉCRITURE SD
+  if (sdErr == 3) {
+    if (ledState)
+      leds.setColorRGB(0,255,0,0);
+    else
+      leds.setColorRGB(0,255,255,255);
+    return;
+  }
+
+  //COULEURS DE MODE (SI PAS D'ERREUR) 
+  if (modeActuel == MODE_STANDARD)
+    leds.setColorRGB(0,0,255,0);// Vert
+
+  else if (modeActuel == MODE_ECO)
+    leds.setColorRGB(0,0,0,255);// Bleu
+
+  else if (modeActuel == MODE_MAINTENANCE)
+    leds.setColorRGB(0,255,165,0);// Orange
+
+  else
+    leds.setColorRGB(0,255,255,0);// Jaune (Config)
+}
+
+//Fonction: LECTURE DES DONNÉES GPS
+void lireGPS() {
+
+  static String ligne = "";// Stocke la ligne de texte reçue
+
+  while (gpsSerial.available()) {// Tant qu'il y a des données sur le port GPS
+
+    char c = gpsSerial.read();// Lire un caractère
+
+    if (c == '\n') {// Si fin de ligne détectée
+
+      if (ligne.startsWith("$GPRMC")) {// Si c'est la trame recommandée pour la position
+
+        int i1 = ligne.indexOf(',');// Trouver 1ère virgule
+        int i2 = ligne.indexOf(',', i1 + 1);
+        int i3 = ligne.indexOf(',', i2 + 1);
+
+        String statut = ligne.substring(i2 + 1, i3);// "A" = OK, "V" = Alerte
+
+        if (statut == "A") {// Si les données sont valides
+
+          int latStart = i3 + 1;
+          int latEnd = ligne.indexOf(',', latStart);
+          latitude = ligne.substring(latStart, latEnd);// Extraction Latitude
+
+          int lonStart = ligne.indexOf(',', latEnd + 1) + 1;
+          int lonEnd = ligne.indexOf(',', lonStart);
+          longitude = ligne.substring(lonStart, lonEnd);// Extraction Longitude
+
+        }
+      }
+
+      ligne = "";// On vide la ligne pour la suivante
+
+    } else {
+
+      ligne += c;// Sinon on ajoute le caractère au tampon
+
+    }
+  }
+}
+// INTERRUPTIONS BOUTONS
+// Les interruptions permettent de détecter immédiatement un appui sur les boutons
+// sans devoir vérifier en permanence leur état dans la boucle principale.
+// Elles servent ici à démarrer le chronométrage pour détecter un appui long (5 secondes).
+void ISR_boutonRouge() {
+  btn_rouge_presse = true;// Indique qu'un appui est en cours
+  t_btn_rouge = millis();// Sauvegarde le moment exact de l'appui
+}
+
+void ISR_boutonVert() {
+  btn_vert_presse = true;// Indique que le bouton vert est pressé
+  t_btn_vert = millis();// Indique que le bouton vert est pressé
+}
+//Initialisation
+void setup() {// Activation des interruptions matérielles sur les boutons
+  attachInterrupt(digitalPinToInterrupt(BTN_ROUGE), ISR_boutonRouge, FALLING);// digitalPinToInterrupt() permet de convertir la pin Arduino en numéro d'interruption
+  attachInterrupt(digitalPinToInterrupt(BTN_VERT), ISR_boutonVert, FALLING);// FALLING signifie que l'interruption se déclenche lorsque le signal passe de HIGH à LOW
+ 
+  gpsSerial.begin(9600);// Débit série GPS
+  Serial.begin(9600);// Débit moniteur série
+  // Lecture de l'intervalle sauvegardé dans l'EEPROM
+  EEPROM.get(0, LOG_INTERVAL);
+  // Si aucune valeur valide n'est trouvée, on remet la valeur par défaut
+  if (LOG_INTERVAL <= 0 || LOG_INTERVAL > 3600000) {
+    LOG_INTERVAL = 600000;
+  }
+  // On récupère l'intervalle de mesure stocké en EEPROM.
+  // Si la mémoire est vide ou contient une valeur incohérente,
+  // on initialise l'intervalle avec la valeur par défaut.
+  Wire.begin();// Initialisation I2C
+
+  pinMode(BTN_ROUGE, INPUT_PULLUP);// Pin en entrée avec résistance de tirage interne
+  pinMode(BTN_VERT, INPUT_PULLUP);// Pin en entrée avec résistance de tirage interne
+
+  // RTC 
+  if(!rtc.begin()) {// Démarrage RTC
+    Serial.println(F("Erreur RTC !"));
+    rtcErr = true;
+  }
+
+  if(!rtc.isrunning()){// Si l'horloge n'est pas à l'heure
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));// On la règle sur l'heure de compilation
+  }
+
+  //Vérification au démarrage : si bouton rouge appuyé -> Mode CONFIG
+  if (digitalRead(BTN_ROUGE) == LOW) {
+      modeActuel = MODE_CONFIG;
+      configStartTime = millis();
+  }
+
+  //Initialisation DHT
+  dht.begin();
+
+ // Initialisation LCD
+  lcd.begin(16, 2);
+
+  // Démarrage SD
+  bool sd_ok = SD.begin(SD_CS);
+  if(!sd_ok) {
+    sdErr = 3;
+    Serial.println(F("Erreur carte SD"));
+  }
+
+  // --- AFFICHAGE INITIAL ---
+  lcd.clear();
+  if (modeActuel == MODE_CONFIG) {
+
+    leds.setColorRGB(0,255,255,0);
+
+    lcd.setCursor(0,0);
+    lcd.print(F("Demarrage"));
+
+    lcd.setCursor(13,1);
+    lcd.print(F("CFG"));
+
+    Serial.println(F("Mode CONFIGURATION"));
+
+  } else {
+
+    leds.setColorRGB(0,0,255,0);
+
+    lcd.setCursor(0,0);
+    lcd.print(F("Demarrage"));
+
+    lcd.setCursor(13,1);
+    lcd.print(F("STD"));
+
+    Serial.println(F("Mode STANDARD"));
+ }
+ delay(1000); // Pause d'accueil de 2s
+  lcd.clear(); // On efface tout pour que loop() démarre sur un écran propre
+}
+
+//Boucle principale
+void loop() {
+   
+    // Gestion des commandes série pour changer l'intervalle
+    if (Serial.available()) {
+
+      String cmd = Serial.readStringUntil('\n');// Lire jusqu'au retour à la ligne
+
+      if (cmd.startsWith("LOG=")) {
+
+        unsigned long valeur = cmd.substring(4).toInt();// Convertir la fin du texte en nombre
+
+        if (valeur > 0) {
+
+          LOG_INTERVAL = valeur;// Appliquer le nouvel intervalle
+          EEPROM.put(0, LOG_INTERVAL);// On sauvegarde le nouvel intervalle dans l'EEPROM pour qu'il soit conservé même après redémarrage
+          lastMeasure = 0;// Forcer une mesure immédiate
+
+          Serial.print("Nouvel intervalle : ");
+          Serial.print(LOG_INTERVAL);
+          Serial.println(" ms");
+        }
+      }
+    }    
+   
+    static bool gpsToggle = false;// Pour lire le GPS de manière alternée
+
+    if(modeActuel != MODE_ECO || gpsToggle){
+    lireGPS();// Lecture GPS (allégée en mode ECO)
+    }
+
+    gpsToggle = !gpsToggle;
+
+    updLED();// Mise à jour visuelle de la LED
+
+    unsigned long now = millis();
+   
+     // TEST RTC 
+    Wire.beginTransmission(0x68);
+    if (Wire.endTransmission() != 0) {
+      rtcErr = true;// Si erreur de transmission, rtcErr = vrai
+    }
+    else {
+      rtcErr = false;
+    }
+   
+    DateTime nowRTC = rtc.now();// Récupérer l'heure actuelle
+    lcd.setCursor(0,0);
+    afficherHeure(lcd, nowRTC);// Afficher l'heure sur la 1ère ligne du LCD
+
+    // MODE CONFIG 
+    if (modeActuel == MODE_CONFIG) {
+       
+       if (millis() - configStartTime > 1800000) {// Timeout après 30 min (1800000 ms)
+
+          modeActuel = MODE_STANDARD;
+
+          lcd.clear();
+          lcd.print(F("MODE STANDARD"));
+
+          Serial.println("Retour automatique mode STANDARD");
+      }
+
+      return;// En mode CONFIG, on ne fait pas les mesures habituelles
+    }
+
+    // BOUTON VERT (MODE ECO) 
+
+    if (btn_vert_presse && (millis() - t_btn_vert >= 5000)) {
+
+    if (modeActuel == MODE_STANDARD) {
+        modeActuel = MODE_ECO;
+        Serial.println(F("Mode ECO"));
+    }
+
+    btn_vert_presse = false;
+}
+
+    // BOUTON ROUGE 
+    
+  if (btn_rouge_presse && digitalRead(BTN_ROUGE) == LOW && (millis() - t_btn_rouge >= 5000)) {
+
+      if (modeActuel == MODE_MAINTENANCE){
+          modeActuel = modePrecedent;
+          Serial.println(F("Sortie du mode MAINTENANCE"));
+      }
+
+      else if (modeActuel == MODE_ECO){
+          modeActuel = MODE_STANDARD;
+          Serial.println(F("Retour MODE STANDARD"));
+      }
+
+      else{
+          modePrecedent = modeActuel;
+          modeActuel = MODE_MAINTENANCE;
+          Serial.println(F("Mode MAINTENANCE"));
+      }
+
+      btn_rouge_presse = false;
+  }
+
+    // Calcul de l'intervalle selon le mode
+    unsigned long intervalle_actuel =
+      (modeActuel == MODE_ECO) ? LOG_INTERVAL * 2 : LOG_INTERVAL;
+
+    //Prise de mesure
+    if (now - lastMeasure >= intervalle_actuel) {
+
+        lastMeasure = now;
+
+        float temp = dht.readTemperature();// Lire température
+        float hum  = dht.readHumidity();// Lire humidité
+        int lum    = analogRead(CAP_LUM);// Lire luminosité
+        // TEST SI CAPTEUR DÉBRANCHÉ (Luminosité)
+        if (lum < (500) || lum > 1015) {
+          Serial.println("Capteur luminosite debranche");
+          sensErr = 1;
+          return;
+}      
+        //VERIFICATION INTEGRITE DHT
+        if (isnan(temp) || isnan(hum)) {
+
+            Serial.println("Erreur Capteur");
+            sensErr = 1;
+            return;
+
+        } else sensErr = 0;
+       
+        // TEST DONNEES INCOHERENTES 
+        if (temp < 0 || temp > 50 || hum < 20 || hum > 90) {
+
+          Serial.println("Donnees incoherentes");
+          sensErr = 2;
+
+}
+        // Mise à jour LCD 
+        lcd.clear();
+
+        lcd.setCursor(9,0);
+        lcd.print(temp,1);
+        lcd.print("C");
+
+        lcd.setCursor(0,1);
+        lcd.print("H:");
+        lcd.print(hum,0);
+        lcd.print("%");
+
+        lcd.setCursor(7,1);
+        lcd.print("L:");
+        lcd.print(lum);
+
+        lcd.setCursor(13,1);
+
+        if (modeActuel == MODE_ECO)
+            lcd.print("ECO");
+
+        else if (modeActuel == MODE_MAINTENANCE)
+            lcd.print("MAINT");
+
+        else
+            lcd.print("STD");
+
+        // ENVOI VERS LE MONITEUR SÉRIE
+        Serial.print("Heure: ");
+        afficherHeure(Serial, nowRTC);
+
+        Serial.print(" | Temp: ");
+        Serial.print(temp,1);
+        Serial.print("C");
+
+        Serial.print(" | Hum: ");
+        Serial.print(hum,0);
+        Serial.print("%");
+
+        Serial.print(" | Lum: ");
+        Serial.print(lum);
+
+        Serial.print(" | Lat: ");
+        Serial.print(latitude);
+
+        Serial.print(" | Lon: ");
+        Serial.println(longitude);
+
+        //ENREGISTREMENT SUR CARTE SD (Sauf en mode Maintenance)
+        if (modeActuel != MODE_MAINTENANCE) {
+
+            File dataFile = SD.open("DATA.LOG", FILE_WRITE);// Ouverture fichier
+
+            if (dataFile) {
+
+                dataFile.print(nowRTC.timestamp());// Date format ISO
+                dataFile.print(" ; ");
+                dataFile.print(temp);
+
+                dataFile.print(" ; ");
+                dataFile.print(hum);
+
+                dataFile.print(" ; ");
+                dataFile.println(lum);
+
+                dataFile.close();//toujours fermer pour enregistrer
+
+            } else {
+
+                sdErr = 3;// Erreur si impossible d'ouvrir le fichier
+
+            }
+        }
+    }
+}
